@@ -1,13 +1,15 @@
 package com.example.mafiabot.llm;
 
-
 public class LocalLLMStub implements LLMService {
+
     @Override
     public String generateResponse(String context) {
-        // Простейшая "эмоциональная" логика — в реале отправляй context в API LLM
-        if (context.contains("accuse")) {
-            return "Интересно... ты уверен в своих словах? Мне кажется, это подозрительно.";
+        if (context == null || context.isBlank()) {
+            return "Сложно сказать, пока нет информации.";
         }
-        return "Я думаю, что стоит прислушаться к мнению Шерифа.";
+        if (context.toLowerCase().contains("выбрал цель")) {
+            return "Он казался наиболее подозрительным по прошлым действиям.";
+        }
+        return "Я считаю, что этот игрок ведёт себя подозрительно и может быть мафией.";
     }
 }

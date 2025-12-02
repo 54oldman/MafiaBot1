@@ -4,6 +4,8 @@ package com.example.mafiabot;
 import com.example.mafiabot.db.*;
 import com.example.mafiabot.game.AIPlayer;
 import com.example.mafiabot.game.GameController;
+import com.example.mafiabot.llm.LLMService;
+import com.example.mafiabot.llm.LocalLLMStub;
 import com.example.mafiabot.telegram.MafiaTelegramBot;
 import org.telegram.telegrambots.meta.TelegramBotsApi;
 import org.telegram.telegrambots.updatesreceivers.DefaultBotSession;
@@ -20,10 +22,15 @@ public class Main {
         MoveDao moveDao = new MoveDao(db);
         TrainingDataDao trainingDataDao = new TrainingDataDao(db);
 
-        AIPlayer aiPlayer = new AIPlayer(moveDao, trainingDataDao);
+// LLM (пока локальная заглушка)
+        LLMService llmService = new LocalLLMStub();
+
+// ИИ получает доступ к БД и LLM
+        AIPlayer aiPlayer = new AIPlayer(moveDao, trainingDataDao, llmService);
 
         GameController controller =
-                new GameController(userDao, gameDao, gamePlayerDao, moveDao, aiPlayer);
+                new GameController(userDao, gameDao, gamePlayerDao, moveDao, trainingDataDao, aiPlayer);
+
 
         TelegramBotsApi botsApi = new TelegramBotsApi(DefaultBotSession.class);
         MafiaTelegramBot bot = new MafiaTelegramBot(botUsername, botToken, controller);

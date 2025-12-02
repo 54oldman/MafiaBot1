@@ -3,6 +3,7 @@ package com.example.mafiabot.telegram;
 import com.example.mafiabot.game.GameController;
 import com.example.mafiabot.game.GameManager;
 import com.example.mafiabot.game.GameSession;
+import com.example.mafiabot.game.Phase;
 import com.example.mafiabot.game.Player;
 import org.telegram.telegrambots.bots.TelegramLongPollingBot;
 import org.telegram.telegrambots.meta.api.methods.send.SendMessage;
@@ -34,27 +35,24 @@ public class MafiaTelegramBot extends TelegramLongPollingBot {
 
     @Override
     public void onUpdateReceived(Update update) {
-        System.out.println("Update received: " + update);
-
         if (!update.hasMessage()) return;
+
         Message msg = update.getMessage();
         long chatId = msg.getChatId();
         long fromId = msg.getFrom().getId();
         String text = msg.getText() == null ? "" : msg.getText().trim();
 
         try {
-            // простой лог для отладки
-            send(chatId, "Я получил от тебя: \"" + text + "\"");
-
             if (text.equals("/start")) {
                 send(chatId,
                         "Привет! Это Мафия.\n" +
                                 "Команды:\n" +
                                 "/join - присоединиться к игре\n" +
-                                "/startgame - начать игру\n" +
-                                "/ai_move - ход ИИ\n" +
-                                "/status - состояние игроков");
-
+                                "/startgame - начать игру (первая фаза: ночь)\n" +
+                                "/ai_move - ход мафии (НОЧЬ)\n" +
+                                "/accuse @username - казнить игрока (ДЕНЬ)\n" +
+                                "/status - состояние игроков и фаза\n" +
+                                "/newgame - начать новую игру");
             } else if (text.equals("/join")) {
                 String username = msg.getFrom().getUserName() != null
                         ? msg.getFrom().getUserName()
@@ -74,20 +72,30 @@ public class MafiaTelegramBot extends TelegramLongPollingBot {
                     }
                 }
 
-            }  else if (text.equals("/ai_move")) {
-            String reply = controller.handleAiMove(chatId);
-            send(chatId, reply);
+            } else if (text.startsWith("/accuse")) {
+                String[] parts = text.split("\\s+");
+                if (parts.length < 2) {
+                    send(chatId, "Укажи цель: /accuse @username");
+                    return;
+                }
+                String targetName = parts[1].replace("@", "");
+                String reply = controller.handleHumanAccuse(chatId, fromId, targetName);
+                send(chatId, reply);
 
+            } else if (text.equals("/ai_move")) {
+                String reply = controller.handleAiMove(chatId);
+                send(chatId, reply);
 
-
-    } else if (text.equals("/status")) {
+            } else if (text.equals("/status")) {
                 GameSession session = controller.getSession(chatId);
                 if (session == null) {
                     send(chatId, "Игра ещё не создана.");
                     return;
                 }
                 GameManager gm = session.getManager();
-                StringBuilder sb = new StringBuilder("Игроки:\n");
+                StringBuilder sb = new StringBuilder();
+                sb.append("Фаза: ").append(gm.getPhase()).append("\n");
+                sb.append("Игроки:\n");
                 for (Player p : gm.getPlayers()) {
                     sb.append(p.getUsername())
                             .append(" - ").append(p.getRole())
@@ -95,6 +103,10 @@ public class MafiaTelegramBot extends TelegramLongPollingBot {
                             .append("\n");
                 }
                 send(chatId, sb.toString());
+
+            } else if (text.equals("/newgame")) {
+                String reply = controller.handleNewGame(chatId);
+                send(chatId, reply);
             }
 
         } catch (Exception e) {
@@ -102,7 +114,6 @@ public class MafiaTelegramBot extends TelegramLongPollingBot {
             send(chatId, "Ошибка: " + e.getMessage());
         }
     }
-
 
     private void send(long chatId, String text) {
         SendMessage sm = new SendMessage(String.valueOf(chatId), text);
