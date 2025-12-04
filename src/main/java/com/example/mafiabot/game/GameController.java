@@ -10,7 +10,8 @@ import java.sql.SQLException;
 import java.util.HashMap;
 import java.util.Map;
 
-public class GameController {
+public class  GameController {
+
     private final Map<Long, GameSession> sessions = new HashMap<>();
 
     private final UserDao userDao;
@@ -34,6 +35,7 @@ public class GameController {
         this.aiPlayer = aiPlayer;
     }
 
+    /** Получаем сессию для чата, если нет — создаём новую игру. */
     private GameSession getOrCreateSession(long chatId) throws SQLException {
         GameSession s = sessions.get(chatId);
         if (s == null) {
@@ -45,6 +47,7 @@ public class GameController {
         return s;
     }
 
+    /** /join */
     public String handleJoin(long chatId, long telegramUserId, String username) throws Exception {
         GameSession session = getOrCreateSession(chatId);
         long dbUserId = userDao.getOrCreateUser(telegramUserId, username);
@@ -54,7 +57,7 @@ public class GameController {
         return "Ты присоединился к игре как " + username;
     }
 
-    /** Старт: создаём (если надо) ИИ и запускаем игру. Первая фаза — НОЧЬ. */
+    /** /startgame — старт, раздача ролей, первая фаза: НОЧЬ */
     public String handleStartGame(long chatId) throws Exception {
         GameSession session = getOrCreateSession(chatId);
         GameManager gm = session.getManager();
@@ -69,8 +72,15 @@ public class GameController {
             gm.joinPlayer(aiTelegramId, aiUsername);
         }
 
-        // старт игры и распределение ролей
-        gm.startGame(); // внутри ставится phase = NIGHT
+        // ПРОВЕРКА: минимум 3 игрока (2 человека + ИИ)
+        int totalPlayers = gm.getPlayers().size();
+        if (totalPlayers < 3) {
+            return "Мало игроков для старта. Нужно минимум 2 человека + ИИ (сейчас: "
+                    + (totalPlayers - 1) + " человек).";
+        }
+
+        // старт игры и распределение ролей (фаза NIGHT)
+        gm.startGame();
 
         // подстраховка по ролям
         for (Player p : gm.getPlayers()) {
@@ -100,7 +110,8 @@ public class GameController {
         return "Игра началась! Сейчас НОЧЬ. Мафия ходит командой /ai_move.";
     }
 
-    /** Ход ИИ (мафия ходит только ночью) */
+
+    /** Ход ИИ (мафии). Разрешён только ночью. */
     public String handleAiMove(long chatId) throws Exception {
         GameSession session = getOrCreateSession(chatId);
         GameManager gm = session.getManager();
@@ -137,16 +148,26 @@ public class GameController {
                     " (outcome=" + outcome + ")";
         } else {
             gm.setPhase(Phase.DAY);
-            text += "\nНаступает ДЕНЬ. Обсуждайте и используйте /accuse @ник для казни.";
+            text += "\nНаступает ДЕНЬ. Обсуждайте и используйте /vote @ник для голосования за казнь.";
         }
 
         return text;
     }
 
-    /** Игрок обвиняет другого (казнь днём) */
-    public String handleHumanAccuse(long chatId,
-                                    long accuserTelegramId,
-                                    String targetUsername) throws Exception {
+    /** Вспомогательный поиск игрока по telegramId. */
+    private Player findPlayerByTelegramId(GameManager gm, long telegramId) {
+        for (Player p : gm.getPlayers()) {
+            if (p.getChatId() == telegramId) {
+                return p;
+            }
+        }
+        return null;
+    }
+
+    /** Голосование днём: /vote или /accuse */
+    public String handleVote(long chatId,
+                             long voterTelegramId,
+                             String targetUsername) throws Exception {
         GameSession session = getOrCreateSession(chatId);
         GameManager gm = session.getManager();
 
@@ -158,11 +179,12 @@ public class GameController {
                     "). Голосовать можно только днём.";
         }
 
-        Long accuserDbId = session.getDbUserId(accuserTelegramId);
-        if (accuserDbId == null) {
+        Long voterDbId = session.getDbUserId(voterTelegramId);
+        if (voterDbId == null) {
             return "Сначала присоединись к игре через /join.";
         }
 
+        // ищем цель по нику
         Player target = null;
         for (Player p : gm.getPlayers()) {
             if (p.getUsername().equalsIgnoreCase(targetUsername)) {
@@ -177,34 +199,97 @@ public class GameController {
             return "Игрок " + targetUsername + " уже выбыл из игры.";
         }
 
-        String text = gm.accuse(accuserTelegramId, target.getChatId());
-        gm.kill(target.getChatId());
+        // регистрируем голос
+        String base = gm.castDayVote(voterTelegramId, target.getChatId());
 
+        // логируем голос в moves
         moveDao.insertMove(
                 session.getGameId(),
-                accuserDbId,
-                "human_accuse",
+                voterDbId,
+                "human_vote",
                 "targetTelegramId=" + target.getChatId()
         );
 
+        // считаем, сколько голосов за каждого живого игрока
+        Map<Long, Long> votes = gm.getDayVotesSnapshot();
+        Map<Long, Integer> counts = new HashMap<>();
+
+        for (Map.Entry<Long, Long> e : votes.entrySet()) {
+            Player voter = findPlayerByTelegramId(gm, e.getKey());
+            if (voter == null || !voter.isAlive()) continue;
+            counts.merge(e.getValue(), 1, Integer::sum);
+        }
+
+        int alive = gm.getAliveCount();
+        int needed = alive / 2 + 1;
+
+        long chosenTargetId = -1;
+        int maxVotes = 0;
+        for (Map.Entry<Long, Integer> e : counts.entrySet()) {
+            if (e.getValue() > maxVotes) {
+                maxVotes = e.getValue();
+                chosenTargetId = e.getKey();
+            }
+        }
+
+        // если большинство ещё не набрано — просто показываем прогресс
+        if (chosenTargetId == -1 || maxVotes < needed) {
+            int currentForTarget = counts.getOrDefault(target.getChatId(), 0);
+            return base + "\nТеперь за " + target.getUsername() + " голосов: "
+                    + currentForTarget + " из " + needed + " необходимых для казни.";
+        }
+
+        // есть большинство — казнь
+        Player lynch = findPlayerByTelegramId(gm, chosenTargetId);
+        if (lynch == null) {
+            return base + "\nПроизошла ошибка при определении цели казни.";
+        }
+
+        String accuseText = gm.accuse(voterTelegramId, lynch.getChatId());
+        gm.kill(lynch.getChatId());
+
+        // логируем саму казнь отдельным ходом
+        moveDao.insertMove(
+                session.getGameId(),
+                voterDbId,
+                "day_execution",
+                "targetTelegramId=" + lynch.getChatId()
+        );
+
+        gm.clearDayVotes(); // новый цикл — голоса обнуляем
+
+        StringBuilder sb = new StringBuilder();
+        sb.append(base).append("\n");
+        sb.append("Голоса подсчитаны. Большинство против ").append(lynch.getUsername()).append(".\n");
+        sb.append("Результат: ").append(accuseText)
+                .append(". Игрок ").append(lynch.getUsername()).append(" казнён днём.\n");
+
+        // проверяем победителя
         String winner = gm.checkWinner();
         if (winner != null) {
             gameDao.finishGame(session.getGameId(), winner);
             String outcome = winner.equals("MAFIA") ? "win" : "lose";
             trainingDataDao.updateOutcomeForGame(session.getGameId(), outcome);
 
-            text += "\nИгра окончена! Победитель: " +
-                    (winner.equals("MAFIA") ? "мафия" : "мирные жители") +
-                    " (outcome=" + outcome + ")";
+            sb.append("Игра окончена! Победитель: ")
+                    .append(winner.equals("MAFIA") ? "мафия" : "мирные жители")
+                    .append(" (outcome=").append(outcome).append(")");
         } else {
             gm.setPhase(Phase.NIGHT);
-            text += "\nНаступает НОЧЬ. Мафия ходит через /ai_move.";
+            sb.append("Наступает НОЧЬ. Мафия ходит через /ai_move.");
         }
 
-        return text;
+        return sb.toString();
     }
 
-    /** Начать новую игру в этом чате */
+    /** Старое /accuse можно оставить как алиас к голосованию. */
+    public String handleHumanAccuse(long chatId,
+                                    long accuserTelegramId,
+                                    String targetUsername) throws Exception {
+        return handleVote(chatId, accuserTelegramId, targetUsername);
+    }
+
+    /** /newgame — новая игра в этом чате. */
     public String handleNewGame(long chatId) throws Exception {
         GameSession old = sessions.get(chatId);
         if (old != null && !old.getManager().isFinished()) {

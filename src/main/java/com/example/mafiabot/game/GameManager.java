@@ -3,12 +3,16 @@ package com.example.mafiabot.game;
 import java.util.*;
 
 /**
- * Отвечает за состояние одной игры: список игроков, роли, жив/мертв, фаза и победитель.
+ * Управляет одной игрой: игроки, роли, фазы (день/ночь), победитель и т.д.
  */
 public class GameManager {
 
+    // telegramId -> Player
     private final Map<Long, Player> players = new LinkedHashMap<>();
     private final List<Round> rounds = new ArrayList<>();
+
+    // Голоса днём: voterId -> targetId
+    private final Map<Long, Long> dayVotes = new HashMap<>();
 
     private boolean started = false;
     private boolean finished = false;
@@ -18,16 +22,16 @@ public class GameManager {
 
     private final Random rnd = new Random();
 
-    /** Добавить игрока (пока игра не началась) */
+    /** Игрок входит в лобби (пока игра не началась). */
     public synchronized void joinPlayer(long chatId, String username) {
         if (started) {
-            // уже играем – новых не добавляем
+            // Игроки после старта не добавляются
             return;
         }
         players.putIfAbsent(chatId, new Player(chatId, username));
     }
 
-    /** Старт игры + распределение ролей, первая фаза — НОЧЬ */
+    /** Старт игры + раздача ролей. Первая фаза — НОЧЬ. */
     public synchronized void startGame() {
         if (started) return;
         started = true;
@@ -35,7 +39,7 @@ public class GameManager {
         phase = Phase.NIGHT;
     }
 
-    /** Распределяем роли между уже добавленными игроками */
+    /** Случайно распределяем роли между игроками. */
     private void assignRoles() {
         List<Player> list = new ArrayList<>(players.values());
         if (list.isEmpty()) return;
@@ -48,28 +52,29 @@ public class GameManager {
             return;
         }
 
+        // Простейшее правило: минимум 1 мафия, примерно 1/4 от игроков
         int mafiaCount = Math.max(1, n / 4);
         int index = 0;
 
-        // мафия
+        // Мафия
         for (int i = 0; i < mafiaCount && index < n; i++, index++) {
             list.get(index).setRole(Role.MAFIA);
         }
 
-        // шериф
+        // Один шериф (если остались игроки)
         if (index < n) {
             list.get(index).setRole(Role.SHERIFF);
             index++;
         }
 
-        // остальные — мирные
+        // Остальные — мирные
         while (index < n) {
             list.get(index).setRole(Role.TOWN);
             index++;
         }
     }
 
-    /** Игрок обвиняет другого – сохраняем ход раунда */
+    /** Простая запись обвинения в историю раундов. */
     public synchronized String accuse(long accuserId, long targetId) {
         Player acc = players.get(accuserId);
         Player tgt = players.get(targetId);
@@ -84,7 +89,7 @@ public class GameManager {
         return acc.getUsername() + " подозревает " + tgt.getUsername();
     }
 
-    /** Пометить игрока как "убитого" */
+    /** Убить игрока (пометить как выбывшего). */
     public synchronized void kill(long targetId) {
         Player tgt = players.get(targetId);
         if (tgt != null) {
@@ -92,10 +97,51 @@ public class GameManager {
         }
     }
 
+    /** Количество живых игроков. */
+    public synchronized int getAliveCount() {
+        int c = 0;
+        for (Player p : players.values()) {
+            if (p.isAlive()) c++;
+        }
+        return c;
+    }
+
+    /**
+     * Зарегистрировать голос игрока днём.
+     * voterId -> targetId
+     */
+    public synchronized String castDayVote(long voterId, long targetId) {
+        Player voter = players.get(voterId);
+        Player target = players.get(targetId);
+
+        if (voter == null || target == null) {
+            return "Игрок не найден.";
+        }
+        if (!voter.isAlive()) {
+            return "Мёртвые не голосуют.";
+        }
+        if (!target.isAlive()) {
+            return "Нельзя голосовать за уже выбывшего игрока.";
+        }
+
+        dayVotes.put(voterId, targetId);
+        return voter.getUsername() + " голосует против " + target.getUsername();
+    }
+
+    /** Снимок голосов дня (voterId -> targetId). */
+    public synchronized Map<Long, Long> getDayVotesSnapshot() {
+        return new HashMap<>(dayVotes);
+    }
+
+    /** Очистить голоса после завершения дня. */
+    public synchronized void clearDayVotes() {
+        dayVotes.clear();
+    }
+
     /**
      * Проверяем, не закончилась ли игра.
-     * Возвращает null, если игра продолжается,
-     * либо строку "MAFIA" / "TOWN", если есть победитель.
+     * @return null, если игра продолжается;
+     *         "MAFIA" или "TOWN", если есть победитель.
      */
     public synchronized String checkWinner() {
         if (!started) return null;
@@ -127,33 +173,33 @@ public class GameManager {
         return winner;
     }
 
-    // --- геттеры/сеттеры ---
+    // ==== Геттеры/сеттеры ====
 
-    public Collection<Player> getPlayers() {
+    public synchronized Collection<Player> getPlayers() {
         return players.values();
     }
 
-    public List<Round> getRounds() {
+    public synchronized List<Round> getRounds() {
         return rounds;
     }
 
-    public boolean isStarted() {
+    public synchronized boolean isStarted() {
         return started;
     }
 
-    public boolean isFinished() {
+    public synchronized boolean isFinished() {
         return finished;
     }
 
-    public String getWinner() {
+    public synchronized String getWinner() {
         return winner;
     }
 
-    public Phase getPhase() {
+    public synchronized Phase getPhase() {
         return phase;
     }
 
-    public void setPhase(Phase phase) {
+    public synchronized void setPhase(Phase phase) {
         this.phase = phase;
     }
 }
