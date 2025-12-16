@@ -10,8 +10,9 @@ import java.util.List;
 import java.util.Random;
 
 /**
- * ИИ-игрок (мафия).
- * Делает ход, записывает его в БД и формирует обучающие данные для модели.
+ * ИИ-логика:
+ *  - ночной выбор цели для мафии;
+ *  - объяснение дневного голоса бота через LLM.
  */
 public class AIPlayer {
 
@@ -31,19 +32,42 @@ public class AIPlayer {
     }
 
     /**
-     * Простейший ИИ:
-     *  - выбирает цель среди живых НЕ-мафий (в приоритете шериф);
-     *  - обвиняет и "убивает" её;
-     *  - пишет ход в moves и training_data;
-     *  - генерирует объяснение с помощью LLM.
+     * Результат решения мафии на ночь.
      */
-    public String makeAccuseMove(GameSession session,
-                                 long aiTelegramId,
-                                 long aiDbUserId) throws Exception {
+    public static class MafiaDecision {
+        public final long targetTelegramId;
+        public final String targetUsername;
+        public final String strategicReason;
+        public final String explanation;
+        public final long moveId;
+
+        public MafiaDecision(long targetTelegramId,
+                             String targetUsername,
+                             String strategicReason,
+                             String explanation,
+                             long moveId) {
+            this.targetTelegramId = targetTelegramId;
+            this.targetUsername = targetUsername;
+            this.strategicReason = strategicReason;
+            this.explanation = explanation;
+            this.moveId = moveId;
+        }
+    }
+
+    /**
+     * ИИ-мафия выбирает цель убийства:
+     *  - не стреляет в себя и других мафий;
+     *  - приоритет: SHERIFF, затем остальные мирные/доктор;
+     *  - логирует ход и возвращает решение.
+     *
+     * Игрок фактически НЕ убивается здесь, только выбирается.
+     */
+    public MafiaDecision decideMafiaTarget(GameSession session,
+                                           long aiTelegramId,
+                                           long aiDbUserId) throws Exception {
 
         GameManager gm = session.getManager();
 
-        // 1. Выбор цели
         Player self = null;
         List<Player> sheriffs = new ArrayList<>();
         List<Player> towns = new ArrayList<>();
@@ -56,30 +80,27 @@ public class AIPlayer {
                 continue;
             }
 
-            // Не стреляем в других мафий
             if (p.getRole() == Role.MAFIA) {
-                continue;
+                continue; // своих не трогаем
             }
 
             if (p.getRole() == Role.SHERIFF) {
                 sheriffs.add(p);
             } else {
-                // TOWN или null — считаем мирным
-                towns.add(p);
+                towns.add(p); // TOWN/DOCTOR/неизвестно
             }
         }
 
         if (self == null) {
-            return "ИИ ещё не добавлен в игру.";
+            return null;
         }
         if (sheriffs.isEmpty() && towns.isEmpty()) {
-            return "ИИ пока не может сделать ход.";
+            return null;
         }
 
         Player target;
         String strategicReason;
 
-        // Приоритет: сначала шерифы, потом обычные мирные
         if (!sheriffs.isEmpty()) {
             target = sheriffs.get(random.nextInt(sheriffs.size()));
             strategicReason =
@@ -87,52 +108,82 @@ public class AIPlayer {
         } else {
             target = towns.get(random.nextInt(towns.size()));
             strategicReason =
-                    "Это мирный игрок, и уменьшение числа мирных повышает шансы мафии на победу.";
+                    "Уменьшение числа мирных повышает шансы мафии на победу.";
         }
 
-        // 2. Логика игры: обвиняем и убиваем цель
-        String resultText = gm.accuse(aiTelegramId, target.getChatId());
-        gm.kill(target.getChatId());
+        // просто добавим обвинение в историю
+        gm.accuse(aiTelegramId, target.getChatId());
 
-        // 3. Записываем ход в таблицу moves
+        // Запись хода в moves
         long moveId = moveDao.insertMove(
                 session.getGameId(),
                 aiDbUserId,
-                "ai_accuse",
+                "ai_night_choice",
                 "targetTelegramId=" + target.getChatId()
         );
 
-        // 4. Снимок состояния игры -> JSON для training_data
+        // Снимок состояния для training_data
         GameStateSnapshot snapshot = GameStateSnapshot.fromManager(gm, "MAFIA_AI");
         String snapshotJson = gson.toJson(snapshot);
 
-        // 5. Просим LLM сгенерировать объяснение хода
+        // Объяснение от LLM
         String llmContext =
                 "Ты играешь в мафию как мафия.\n" +
                         "Живые игроки: " + snapshot.aliveUsernames + "\n" +
                         "Ты выбрал цель: " + target.getUsername() + "\n" +
-                        "Опиши коротко, почему мафия могла выбрать именно его.";
+                        "Кратко объясни, почему мафия могла выбрать именно этого игрока.";
         String explanation = llmService.generateResponse(llmContext);
 
-        // 6. Сохраняем обучающий пример
+        // Обучающий пример
         trainingDao.insertTrainingRow(
                 session.getGameId(),
                 moveId,
                 "mafia_ai",
                 snapshotJson,
-                "accuse:" + target.getUsername(),
-                "unknown"   // итог (win/lose) проставляется при завершении игры
+                "chooseKill:" + target.getUsername(),
+                "unknown"
         );
 
-        // 7. Формируем текст для чата
-        return "ИИ (мафия) делает ход: " + resultText +
-                ". Игрок " + target.getUsername() + " выбывает из игры.\n" +
-                "Стратегия: " + strategicReason + "\n" +
-                "Объяснение ИИ: " + explanation;
+        return new MafiaDecision(
+                target.getChatId(),
+                target.getUsername(),
+                strategicReason,
+                explanation,
+                moveId
+        );
     }
 
     /**
-     * Упрощённый снимок состояния игры для записи в training_data.
+     * Объяснение дневного голоса бота.
+     * Используется в GameController.autoBotVotes().
+     */
+    public String explainDayVote(GameManager gm, Player bot, Player target) {
+        try {
+            GameStateSnapshot snapshot = GameStateSnapshot.fromManager(
+                    gm,
+                    bot.getRole() != null ? bot.getRole().name() : "UNKNOWN"
+            );
+
+            String roleText = (bot.getRole() != null) ? bot.getRole().name() : "UNKNOWN";
+
+            String context =
+                    "Сейчас идёт дневное голосование в настольной игре \"Мафия\".\n" +
+                            "Ты играешь за роль: " + roleText + ".\n" +
+                            "Живые игроки: " + snapshot.aliveUsernames + ".\n" +
+                            "Ты решил проголосовать против игрока: " + target.getUsername() + ".\n" +
+                            "Кратко и по-русски объясни, почему такой выбор кажется логичным " +
+                            "с точки зрения твоей роли. 1–3 предложения.";
+
+            return llmService.generateResponse(context);
+        } catch (Exception e) {
+            e.printStackTrace();
+            return "Не удалось получить объяснение от LLM.";
+        }
+    }
+
+    /**
+     * Упрощённый снимок состояния игры для записи в training_data
+     * и для контекста LLM.
      */
     public static class GameStateSnapshot {
         public int aliveCount;

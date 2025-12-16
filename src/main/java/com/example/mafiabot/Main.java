@@ -1,11 +1,12 @@
 package com.example.mafiabot;
 
-
+import com.example.mafiabot.llm.LLMService;
+import com.example.mafiabot.llm.OpenAiLLMService;
 import com.example.mafiabot.db.*;
 import com.example.mafiabot.game.AIPlayer;
 import com.example.mafiabot.game.GameController;
-import com.example.mafiabot.llm.LLMService;
-import com.example.mafiabot.llm.LocalLLMStub;
+
+
 import com.example.mafiabot.telegram.MafiaTelegramBot;
 import org.telegram.telegrambots.meta.TelegramBotsApi;
 import org.telegram.telegrambots.updatesreceivers.DefaultBotSession;
@@ -23,7 +24,8 @@ public class Main {
         TrainingDataDao trainingDataDao = new TrainingDataDao(db);
 
 // LLM (пока локальная заглушка)
-        LLMService llmService = new LocalLLMStub();
+        String openAiApiKey = System.getenv("OPENAI_API_KEY");
+        LLMService llmService = new OpenAiLLMService(openAiApiKey, "gpt-4o-mini");
 
 // ИИ получает доступ к БД и LLM
         AIPlayer aiPlayer = new AIPlayer(moveDao, trainingDataDao, llmService);

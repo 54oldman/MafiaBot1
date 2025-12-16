@@ -3,7 +3,7 @@ package com.example.mafiabot.game;
 import java.util.*;
 
 /**
- * Управляет одной игрой: игроки, роли, фазы (день/ночь), победитель и т.д.
+ * Управляет одной игрой: игроки, роли, фазы (день/ночь), победитель, голоса.
  */
 public class GameManager {
 
@@ -25,8 +25,7 @@ public class GameManager {
     /** Игрок входит в лобби (пока игра не началась). */
     public synchronized void joinPlayer(long chatId, String username) {
         if (started) {
-            // Игроки после старта не добавляются
-            return;
+            return; // после старта не принимаем новых
         }
         players.putIfAbsent(chatId, new Player(chatId, username));
     }
@@ -39,38 +38,48 @@ public class GameManager {
         phase = Phase.NIGHT;
     }
 
-    /** Случайно распределяем роли между игроками. */
+    /**
+     * Распределяем роли:
+     *  - 2 мафии
+     *  - 1 шериф
+     *  - 1 доктор
+     *  - остальные (в нашем режиме это ещё 3) — мирные
+     *
+     * Ожидается, что игроков ровно 7.
+     */
     private void assignRoles() {
         List<Player> list = new ArrayList<>(players.values());
-        if (list.isEmpty()) return;
-
-        Collections.shuffle(list, rnd);
         int n = list.size();
-
-        if (n == 1) {
-            list.get(0).setRole(Role.TOWN);
+        if (n < 4) {
+            // fallback: если вдруг кто-то запустил без нужного числа игроков –
+            // минимальный вариант: 1 мафия + 1 шериф + остальные мирные
+            Collections.shuffle(list, rnd);
+            if (n == 0) return;
+            list.get(0).setRole(Role.MAFIA);
+            if (n > 1) {
+                list.get(1).setRole(Role.SHERIFF);
+            }
+            for (int i = 2; i < n; i++) {
+                list.get(i).setRole(Role.TOWN);
+            }
             return;
         }
 
-        // Простейшее правило: минимум 1 мафия, примерно 1/4 от игроков
-        int mafiaCount = Math.max(1, n / 4);
-        int index = 0;
+        Collections.shuffle(list, rnd);
 
-        // Мафия
-        for (int i = 0; i < mafiaCount && index < n; i++, index++) {
-            list.get(index).setRole(Role.MAFIA);
-        }
+        // 2 мафии
+        list.get(0).setRole(Role.MAFIA);
+        if (n > 1) list.get(1).setRole(Role.MAFIA);
 
-        // Один шериф (если остались игроки)
-        if (index < n) {
-            list.get(index).setRole(Role.SHERIFF);
-            index++;
-        }
+        // 1 шериф
+        if (n > 2) list.get(2).setRole(Role.SHERIFF);
 
-        // Остальные — мирные
-        while (index < n) {
-            list.get(index).setRole(Role.TOWN);
-            index++;
+        // 1 доктор
+        if (n > 3) list.get(3).setRole(Role.DOCTOR);
+
+        // остальные — мирные
+        for (int i = 4; i < n; i++) {
+            list.get(i).setRole(Role.TOWN);
         }
     }
 
@@ -142,6 +151,8 @@ public class GameManager {
      * Проверяем, не закончилась ли игра.
      * @return null, если игра продолжается;
      *         "MAFIA" или "TOWN", если есть победитель.
+     *
+     * Доктор и шериф считаются на стороне мирных.
      */
     public synchronized String checkWinner() {
         if (!started) return null;
@@ -156,6 +167,7 @@ public class GameManager {
             if (p.getRole() == Role.MAFIA) {
                 mafiaAlive++;
             } else {
+                // TOWN, SHERIFF, DOCTOR
                 townAlive++;
             }
         }

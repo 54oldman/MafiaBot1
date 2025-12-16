@@ -11,8 +11,7 @@ import org.telegram.telegrambots.meta.api.objects.Update;
 import org.telegram.telegrambots.meta.exceptions.TelegramApiException;
 
 /**
- * Telegram-бот для игры в мафию.
- * Обрабатывает команды и делегирует логику в GameController.
+ * Telegram-бот для игры в Мафию.
  */
 public class MafiaTelegramBot extends TelegramLongPollingBot {
 
@@ -48,15 +47,17 @@ public class MafiaTelegramBot extends TelegramLongPollingBot {
         String text = msg.getText().trim();
 
         try {
-            // /start — помощь
+            // /start — краткая помощь
             if (text.equals("/start")) {
                 send(chatId,
                         "Привет! Это Мафия.\n" +
                                 "Команды:\n" +
                                 "/join - присоединиться к игре\n" +
+                                "/addbots N - добавить N ботов в игру\n" +
                                 "/startgame - начать игру (первая фаза: НОЧЬ)\n" +
                                 "/ai_move - ход мафии (НОЧЬ)\n" +
                                 "/accuse @username или /vote @username - голосовать за казнь (ДЕНЬ)\n" +
+                                "/endday - завершить день и подсчитать голоса\n" +
                                 "/status - состояние игроков и текущая фаза\n" +
                                 "/newgame - начать новую игру");
 
@@ -68,17 +69,34 @@ public class MafiaTelegramBot extends TelegramLongPollingBot {
                 String reply = controller.handleJoin(chatId, fromId, username);
                 send(chatId, reply);
 
+                // /addbots N
+            } else if (text.startsWith("/addbots")) {
+                String[] parts = text.split("\\s+");
+                int count = 1;
+                if (parts.length >= 2) {
+                    try {
+                        count = Integer.parseInt(parts[1]);
+                    } catch (NumberFormatException e) {
+                        send(chatId, "Использование: /addbots N (например, /addbots 3)");
+                        return;
+                    }
+                }
+                String reply = controller.handleAddBots(chatId, count);
+                send(chatId, reply);
+
                 // /startgame
             } else if (text.equals("/startgame")) {
                 String reply = controller.handleStartGame(chatId);
                 send(chatId, reply);
 
-                // рассылаем роли в личку каждому игроку
+                // рассылаем роли в личку каждому реальному игроку
                 GameSession session = controller.getSession(chatId);
                 if (session != null) {
                     GameManager gm = session.getManager();
                     for (Player p : gm.getPlayers()) {
-                        send(p.getChatId(), "Твоя роль: " + p.getRole());
+                        if (p.getChatId() > 0) { // только настоящие Telegram-пользователи
+                            send(p.getChatId(), "Твоя роль: " + p.getRole());
+                        }
                     }
                 }
 
@@ -93,12 +111,17 @@ public class MafiaTelegramBot extends TelegramLongPollingBot {
                 String reply = controller.handleVote(chatId, fromId, targetName);
                 send(chatId, reply);
 
+                // /endday — завершить день и подсчитать голоса
+            } else if (text.equals("/endday")) {
+                String reply = controller.handleEndDay(chatId);
+                send(chatId, reply);
+
                 // /ai_move — ход мафии ночью
             } else if (text.equals("/ai_move")) {
                 String reply = controller.handleAiMove(chatId);
                 send(chatId, reply);
 
-                // /status — фаза и список игроков (роли скрыты до конца игры)
+                // /status — фаза + список игроков, роли скрыты до конца игры
             } else if (text.equals("/status")) {
                 GameSession session = controller.getSession(chatId);
                 if (session == null) {
@@ -106,7 +129,7 @@ public class MafiaTelegramBot extends TelegramLongPollingBot {
                     return;
                 }
                 GameManager gm = session.getManager();
-                boolean revealRoles = gm.isFinished(); // роли открываем только после окончания
+                boolean revealRoles = gm.isFinished(); // роли открываем только после окончания игры
 
                 StringBuilder sb = new StringBuilder();
                 sb.append("Фаза: ").append(gm.getPhase()).append("\n");
@@ -114,7 +137,6 @@ public class MafiaTelegramBot extends TelegramLongPollingBot {
                 for (Player p : gm.getPlayers()) {
                     String roleStr;
                     if (revealRoles || p.getChatId() == fromId) {
-                        // если игра закончилась или это сам игрок — показываем роль
                         roleStr = String.valueOf(p.getRole());
                     } else {
                         roleStr = "???";
@@ -138,7 +160,7 @@ public class MafiaTelegramBot extends TelegramLongPollingBot {
         }
     }
 
-    /** Удобный метод для отправки текста в чат/личку. */
+    /** Отправка текста. */
     private void send(long chatId, String text) {
         SendMessage sm = new SendMessage(String.valueOf(chatId), text);
         try {
